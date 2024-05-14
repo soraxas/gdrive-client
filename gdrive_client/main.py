@@ -11,6 +11,7 @@ import pickle
 import json
 import os
 import io
+import hashlib
 
 
 from loguru import logger
@@ -31,6 +32,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--local-folder", type=str, default=os.path.realpath("."))
 parser.add_argument("--drive-folder-id", type=str, required=True)
 parser.add_argument("--download-only", type=str, default=True)
+parser.add_argument("--credentials", type=str, default="client_secrets.json")
+parser.add_argument("--token-cache", type=str, default="token.pickle")
 
 
 class Utils:
@@ -70,12 +73,13 @@ API_URL = ["https://www.googleapis.com/auth/drive"]
 
 class Drive:
 
-    def __init__(self):
+    def __init__(self, token_fname):
         creds = None
+        self.token_fname = token_fname
 
         # Checks if authentication token exists, then load it
-        if os.path.exists("token.pickle"):
-            with open("token.pickle", "rb") as token:
+        if os.path.exists(self.token_fname):
+            with open(self.token_fname, "rb") as token:
                 creds = pickle.load(token)
 
         # Create new authencation token if it does not exist or has expired
@@ -84,11 +88,11 @@ class Drive:
                 creds.refresh(Request())
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    "credentials.json", API_URL
+                    ARGS.credentials, API_URL
                 )
                 creds = flow.run_local_server(port=0)
 
-            with open("token.pickle", "wb") as token:
+            with open(self.token_fname, "wb") as token:
                 pickle.dump(creds, token)
 
         self.__service = build("drive", "v3", credentials=creds)
@@ -100,7 +104,7 @@ class Drive:
             self.__service.files()
             .list(
                 q=f"'{folder_id}' in parents",
-                fields="files(id,name,modifiedTime,mimeType)",
+                fields="files(id,name,modifiedTime,mimeType,md5Checksum)",
             )
             .execute()
         )
@@ -242,11 +246,23 @@ class Drive:
         elif local_file_data["modifiedTime"] < remote_file_data["modifiedTime"]:
             modified = "remote"
 
+        remote_md5 = remote_file_data.get("md5Checksum", None)
+        if modified and remote_md5:
+            # check md5
+            with open(local_file_data["path"], "rb") as f:
+                # read contents of the file
+                local_md5 = hashlib.md5(f.read()).hexdigest()
+            if remote_md5 == local_md5:
+                modified = False
+            # else:
+            #     print("Do something here")
+            #     risen
+
         return modified
 
     # Recursive method to synchronize all folder and files
     def synchronize(self, local_path, folder_id, recursive=False):
-        logger.info(
+        logger.trace(
             "{} folder '{}'",
             "Recursively synchronizing" if recursive else "Synchronizing",
             local_path,
@@ -276,7 +292,7 @@ class Drive:
                 remote_file_data["modifiedTime"]
             )
 
-            local_file_data = {}
+            local_file_data = dict(path=local_absolute_path)
             local_file_data["name"] = sm_file
             try:
                 local_file_data["modifiedTime"] = Utils.get_local_file_timestamp(
@@ -356,34 +372,10 @@ def run():
     global ARGS
     ARGS = parser.parse_args()
 
-    # # Make sure configuration file exists and is updated
-    # if not os.path.exists("./configs.json"):
-    #     logger.error(
-    #         "Please rename example file 'configs-example.json' to 'configs.json' and update all required fields."
-    #     )
-    #     return
-
-    configs = json.load(open("configs.json", "r", encoding="utf-8"))
-
-    # Make sure backup folder exists
-    if not os.path.exists(configs["local_folder_abs_path"]):
-        logger.error("Create backup folder on '{}'.", configs["local_folder_abs_path"])
-        return
-
-    # Configure logging to file if enabled
-    if configs["log_to_file"]:
-        log_path = os.path.join(configs["local_folder_abs_path"], "sync.log")
-        if not os.path.exists(log_path):
-            log_obj = open(log_path, "w")
-        else:
-            log_obj = open(log_path, "a")
-
-        logger.add(log_obj, format="{time} | {level} | {function} | {message}")
-
     logger.success("Starting synchronization...")
 
     # Instantiate Drive class and synchronize files
-    my_drive = Drive()
+    my_drive = Drive(ARGS.token_cache)
     my_drive.synchronize(ARGS.local_folder, ARGS.drive_folder_id)
 
     logger.success("Synchronization finalized!")
